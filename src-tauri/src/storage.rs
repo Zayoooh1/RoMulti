@@ -26,6 +26,8 @@ pub struct PublicAccount {
     pub display_name: String,
     pub avatar_url: String,
     pub added_at: u64,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +39,8 @@ struct StoredAccount {
     avatar_url: String,
     encrypted_cookie: String,
     added_at: u64,
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -52,6 +56,7 @@ impl From<&StoredAccount> for PublicAccount {
             display_name: acc.display_name.clone(),
             avatar_url: acc.avatar_url.clone(),
             added_at: acc.added_at,
+            tags: acc.tags.clone(),
         }
     }
 }
@@ -99,6 +104,13 @@ impl AccountStorage {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
+        let preserved_tags = data
+            .accounts
+            .iter()
+            .find(|a| a.user_id == user_id)
+            .map(|a| a.tags.clone())
+            .unwrap_or_default();
+
         let entry = StoredAccount {
             user_id,
             username,
@@ -106,6 +118,7 @@ impl AccountStorage {
             avatar_url,
             encrypted_cookie,
             added_at: now,
+            tags: preserved_tags,
         };
         let public = PublicAccount::from(&entry);
 
@@ -114,6 +127,38 @@ impl AccountStorage {
         } else {
             data.accounts.push(entry);
         }
+
+        self.write_file_unlocked(&data)?;
+        Ok(public)
+    }
+
+    pub fn update_account_tags(
+        &self,
+        user_id: u64,
+        tags: Vec<String>,
+    ) -> Result<PublicAccount, String> {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut data = self.read_file_unlocked()?;
+
+        let existing = data
+            .accounts
+            .iter_mut()
+            .find(|a| a.user_id == user_id)
+            .ok_or_else(|| format!("Account {user_id} not found."))?;
+
+        let mut cleaned: Vec<String> = Vec::new();
+        for raw in tags {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !cleaned.iter().any(|t| t.eq_ignore_ascii_case(trimmed)) {
+                cleaned.push(trimmed.to_string());
+            }
+        }
+
+        existing.tags = cleaned;
+        let public = PublicAccount::from(&*existing);
 
         self.write_file_unlocked(&data)?;
         Ok(public)

@@ -1,6 +1,9 @@
+use crate::config::ConfigStorage;
 use crate::launcher::{
     is_pid_alive, kill_process_by_pid, launch_single_account, snapshot_roblox_pids,
+    spawn_delayed_mute_apply,
 };
+use crate::notifications::NotificationManager;
 use crate::optimizer::PerformanceManager;
 use crate::roblox_api::RobloxApiClient;
 use crate::storage::AccountStorage;
@@ -86,6 +89,7 @@ struct TrackedSession {
     pid: Option<u32>,
     status: SessionStatus,
     launched_at: Instant,
+    order_seq: u64,
     consecutive_failures: u32,
     last_message: String,
 }
@@ -111,6 +115,7 @@ pub struct AutoRejoinManager {
     config: Mutex<AutoRejoinConfig>,
     running: AtomicBool,
     generation: AtomicU64,
+    next_order_seq: AtomicU64,
     wakeup: Arc<Notify>,
 }
 
@@ -121,6 +126,7 @@ impl AutoRejoinManager {
             config: Mutex::new(AutoRejoinConfig::default()),
             running: AtomicBool::new(false),
             generation: AtomicU64::new(0),
+            next_order_seq: AtomicU64::new(1),
             wakeup: Arc::new(Notify::new()),
         }
     }
@@ -139,9 +145,20 @@ impl AutoRejoinManager {
         list
     }
 
+    pub fn get_session(&self, user_id: u64) -> Option<ActiveSessionInfo> {
+        let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        guard.get(&user_id).map(TrackedSession::to_info)
+    }
+
+    /// Returns tracked PIDs ordered by launch sequence (first launched account comes first).
     pub fn tracked_pids(&self) -> Vec<u32> {
         let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        guard.values().filter_map(|s| s.pid).collect()
+        let mut items: Vec<(u64, u32)> = guard
+            .values()
+            .filter_map(|s| s.pid.map(|pid| (s.order_seq, pid)))
+            .collect();
+        items.sort_by_key(|(seq, _)| *seq);
+        items.into_iter().map(|(_, pid)| pid).collect()
     }
 
     pub fn tracked_pid_set(&self) -> HashSet<u32> {
@@ -149,6 +166,15 @@ impl AutoRejoinManager {
         guard.values().filter_map(|s| s.pid).collect()
     }
 
+    pub fn tracked_pid_usernames(&self) -> HashMap<u32, String> {
+        let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .values()
+            .filter_map(|s| s.pid.map(|pid| (pid, s.username.clone())))
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_session(
         &self,
         app: &AppHandle,
@@ -163,6 +189,10 @@ impl AutoRejoinManager {
     ) {
         let info = {
             let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            let order_seq = guard
+                .get(&user_id)
+                .map(|s| s.order_seq)
+                .unwrap_or_else(|| self.next_order_seq.fetch_add(1, Ordering::SeqCst));
             let session = TrackedSession {
                 user_id,
                 username,
@@ -172,6 +202,7 @@ impl AutoRejoinManager {
                 pid,
                 status,
                 launched_at: Instant::now(),
+                order_seq,
                 consecutive_failures: 0,
                 last_message: message,
             };
@@ -182,6 +213,20 @@ impl AutoRejoinManager {
         let _ = app.emit("session-updated", info);
     }
 
+    pub fn update_session_job_id(&self, app: &AppHandle, user_id: u64, job_id: Option<String>) {
+        let maybe_info = {
+            let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            guard.get_mut(&user_id).map(|session| {
+                session.job_id = job_id;
+                session.to_info()
+            })
+        };
+        if let Some(info) = maybe_info {
+            let _ = app.emit("session-updated", info);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn set_session_status(
         &self,
         app: &AppHandle,
@@ -220,12 +265,15 @@ impl AutoRejoinManager {
         guard.remove(&user_id);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn set_config(
         self: &Arc<Self>,
         app: AppHandle,
         storage: Arc<AccountStorage>,
         api: Arc<RobloxApiClient>,
         performance: Arc<PerformanceManager>,
+        config_storage: Arc<ConfigStorage>,
+        notifications: Arc<NotificationManager>,
         mut new_config: AutoRejoinConfig,
     ) -> AutoRejoinConfig {
         new_config.interval_minutes = new_config.interval_minutes.clamp(1, 240);
@@ -253,7 +301,15 @@ impl AutoRejoinManager {
 
                 tauri::async_runtime::spawn(async move {
                     manager
-                        .monitor_loop(gen, app_clone, storage, api, performance)
+                        .monitor_loop(
+                            gen,
+                            app_clone,
+                            storage,
+                            api,
+                            performance,
+                            config_storage,
+                            notifications,
+                        )
                         .await;
                 });
             } else {
@@ -315,6 +371,7 @@ impl AutoRejoinManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn monitor_loop(
         self: Arc<Self>,
         expected_gen: u64,
@@ -322,6 +379,8 @@ impl AutoRejoinManager {
         storage: Arc<AccountStorage>,
         api: Arc<RobloxApiClient>,
         performance: Arc<PerformanceManager>,
+        config_storage: Arc<ConfigStorage>,
+        notifications: Arc<NotificationManager>,
     ) {
         while !self.is_cancelled(expected_gen) {
             if self
@@ -344,7 +403,7 @@ impl AutoRejoinManager {
                     break;
                 }
 
-                // Skip sessions that have already hit the max consecutive retry limit or are actively launching
+                // Skip sessions that have already hit the max consecutive retry limit, are launching, or stopped
                 if session.consecutive_failures >= MAX_CONSECUTIVE_FAILURES
                     || session.status == SessionStatus::Launching
                     || session.status == SessionStatus::Stopped
@@ -384,7 +443,6 @@ impl AutoRejoinManager {
                             match api.fetch_user_presence(session.user_id, &cookie).await {
                                 Ok(presence) => {
                                     if presence.user_presence_type == 2 {
-                                        // Confirmed in-game
                                         if session.status != SessionStatus::InGame
                                             || session.consecutive_failures > 0
                                         {
@@ -406,11 +464,14 @@ impl AutoRejoinManager {
                                     }
                                 }
                                 Err(err) => {
-                                    // Transient API/network failure shouldn't falsely kill a running game;
-                                    // only report expired session if cookie was rejected.
-                                    if err.to_lowercase().contains("rejected")
-                                        || err.to_lowercase().contains("expired")
-                                    {
+                                    let lower = err.to_lowercase();
+                                    if lower.contains("rejected") || lower.contains("expired") {
+                                        let settings = config_storage.get_app_settings();
+                                        notifications.notify_expired_cookie(
+                                            &settings,
+                                            &session.username,
+                                            &err,
+                                        );
                                         self.set_session_status(
                                             &app,
                                             session.user_id,
@@ -474,6 +535,14 @@ impl AutoRejoinManager {
                     },
                 );
 
+                notifications.notify_rejoin_triggered(
+                    &config_storage.get_app_settings(),
+                    &session.username,
+                    session.place_id,
+                    &reason,
+                    attempt,
+                );
+
                 // Wait 3 seconds before re-launching (cancellable)
                 if self
                     .sleep_cancellable(expected_gen, Duration::from_secs(3))
@@ -518,22 +587,59 @@ impl AutoRejoinManager {
                             Some(0),
                         );
 
+                        if let Some(pid) = outcome.pid {
+                            window_manager::spawn_window_title_setter(
+                                pid,
+                                outcome.username.clone(),
+                            );
+                        }
+                        spawn_delayed_mute_apply(
+                            Arc::clone(&self),
+                            Arc::clone(&config_storage),
+                            None,
+                        );
+
                         // If auto_arrange is enabled, arrange windows after rejoin window opens
-                        if self.get_config().auto_arrange {
-                            if !self
+                        if self.get_config().auto_arrange
+                            && !self
                                 .sleep_cancellable(expected_gen, Duration::from_secs(4))
                                 .await
-                            {
-                                let tracked = self.tracked_pids();
-                                let all_pids = snapshot_roblox_pids();
-                                let _ =
-                                    window_manager::arrange_roblox_windows(&tracked, &all_pids);
-                            }
+                        {
+                            let tracked = self.tracked_pids();
+                            let all_pids = snapshot_roblox_pids();
+                            let pid_usernames = self.tracked_pid_usernames();
+                            let monitor_id =
+                                config_storage.get_app_settings().default_monitor_id;
+                            let _ = window_manager::arrange_roblox_windows(
+                                &tracked,
+                                &all_pids,
+                                monitor_id.as_deref(),
+                                &pid_usernames,
+                            );
                         }
                     }
                     Err(err) => {
                         let next_fails = session.consecutive_failures + 1;
                         let exhausted = next_fails >= MAX_CONSECUTIVE_FAILURES;
+                        let lower = err.to_lowercase();
+                        let settings = config_storage.get_app_settings();
+
+                        if lower.contains("rejected") || lower.contains("expired") {
+                            notifications.notify_expired_cookie(
+                                &settings,
+                                &session.username,
+                                &err,
+                            );
+                        }
+                        if exhausted {
+                            notifications.notify_rejoin_failed(
+                                &settings,
+                                &session.username,
+                                session.place_id,
+                                &err,
+                            );
+                        }
+
                         let msg = if exhausted {
                             format!(
                                 "Auto Rejoin paused after {MAX_CONSECUTIVE_FAILURES} failed attempts: {err}"

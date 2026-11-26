@@ -7,18 +7,27 @@ import {
   validatePrivateServerLink,
 } from "./components/GameSearchPanel";
 import { LaunchBar } from "./components/LaunchBar";
+import { ProfilesBar } from "./components/ProfilesBar";
+import { SettingsModal } from "./components/SettingsModal";
 import { TopBar } from "./components/TopBar";
 import type {
   ActiveSessionInfo,
+  AppConfig,
   ApplyPerformanceResult,
+  AppSettings,
   ArrangeWindowsResult,
+  AudioApplyResult,
   AuthErrorPayload,
   AuthStatusPayload,
   AutoRejoinConfig,
+  FavoriteGame,
   GameSearchResult,
   LaunchCompleteEvent,
+  LaunchProfile,
   LaunchProgressEvent,
   LogEntry,
+  MonitorInfo,
+  MuteMode,
   MutexStatus,
   PerformanceSettings,
   PublicAccount,
@@ -33,6 +42,16 @@ function nowTime(): string {
   });
 }
 
+const DEFAULT_APP_SETTINGS: AppSettings = {
+  minimizeToTray: false,
+  discordWebhookUrl: "",
+  notifyExpiredCookie: true,
+  notifyRejoinFailed: true,
+  notifyEveryRejoin: false,
+  defaultMonitorId: null,
+  muteMode: "off",
+};
+
 export function App() {
   // Mutex status
   const [mutexStatus, setMutexStatus] = useState<MutexStatus | null>(null);
@@ -43,21 +62,32 @@ export function App() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [verifyStates, setVerifyStates] = useState<Record<number, AccountVerifyState>>({});
   const [sessions, setSessions] = useState<Record<number, ActiveSessionInfo>>({});
+  const [mutedAccounts, setMutedAccounts] = useState<Record<number, boolean>>({});
+  const [busySessions, setBusySessions] = useState<Record<number, string | undefined>>({});
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [authMessage, setAuthMessage] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  // Game search & Private Server state
+  // Config: favorites, profiles, app settings
+  const [appConfig, setAppConfig] = useState<AppConfig>({
+    favorites: [],
+    profiles: [],
+    appSettings: DEFAULT_APP_SETTINGS,
+  });
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Game search, Private Server & Join Same Server state
   const [query, setQuery] = useState("");
   const [jobId, setJobId] = useState("");
   const [privateServerLink, setPrivateServerLink] = useState("");
+  const [joinSameServer, setJoinSameServer] = useState(false);
   const [results, setResults] = useState<GameSearchResult[]>([]);
   const [selectedGame, setSelectedGame] = useState<GameSearchResult | null>(null);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
 
-  // Launch, Auto Rejoin, Grid & Performance state
+  // Launch, Auto Rejoin, Grid, Monitors, Audio & Performance state
   const [delaySeconds, setDelaySeconds] = useState(6);
   const [isLaunching, setIsLaunching] = useState(false);
   const [currentProgress, setCurrentProgress] = useState<LaunchProgressEvent | null>(null);
@@ -71,8 +101,12 @@ export function App() {
     fpsCap: null,
     lowCpuMode: false,
   });
+  const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
+  const [selectedMonitorId, setSelectedMonitorId] = useState<string | null>(null);
+  const [muteMode, setMuteMode] = useState<MuteMode>("off");
   const [applyingPerf, setApplyingPerf] = useState(false);
   const [arranging, setArranging] = useState(false);
+  const [applyingMute, setApplyingMute] = useState(false);
 
   const searchRequestId = useRef(0);
 
@@ -131,10 +165,12 @@ export function App() {
 
   const loadInitialSessionState = useCallback(async () => {
     try {
-      const [activeList, cfg, perf] = await Promise.all([
+      const [activeList, cfg, perf, configData, monitorList] = await Promise.all([
         invoke<ActiveSessionInfo[]>("get_active_sessions"),
         invoke<AutoRejoinConfig>("get_auto_rejoin_config"),
         invoke<PerformanceSettings>("get_performance_settings"),
+        invoke<AppConfig>("get_app_config"),
+        invoke<MonitorInfo[]>("list_monitors"),
       ]);
       const map: Record<number, ActiveSessionInfo> = {};
       for (const s of activeList) {
@@ -143,6 +179,17 @@ export function App() {
       setSessions(map);
       setRejoinConfig(cfg);
       setPerformance(perf);
+      setAppConfig(configData);
+      setMonitors(monitorList);
+      setMuteMode(configData.appSettings.muteMode ?? "off");
+
+      const savedMon = configData.appSettings.defaultMonitorId;
+      if (savedMon && monitorList.some((m) => m.id === savedMon)) {
+        setSelectedMonitorId(savedMon);
+      } else {
+        const primary = monitorList.find((m) => m.isPrimary) ?? monitorList[0];
+        setSelectedMonitorId(primary?.id ?? null);
+      }
     } catch {
       // Non-fatal during initial bootstrap
     }
@@ -231,6 +278,9 @@ export function App() {
       }),
       listen<MutexStatus>("mutex-status", (event) => {
         setMutexStatus(event.payload);
+      }),
+      listen<MuteMode>("mute-mode-changed", (event) => {
+        setMuteMode(event.payload);
       }),
     ];
 
@@ -357,6 +407,15 @@ export function App() {
     }
   };
 
+  const handleUpdateTags = async (userId: number, tags: string[]) => {
+    try {
+      const updated = await invoke<PublicAccount>("update_account_tags", { userId, tags });
+      setAccounts((prev) => prev.map((a) => (a.userId === updated.userId ? updated : a)));
+    } catch (err) {
+      appendLog("error", `Failed to update tags: ${String(err)}`);
+    }
+  };
+
   const handleToggleSelect = (userId: number) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -377,34 +436,175 @@ export function App() {
     setSelectedIds(new Set());
   };
 
+  const handleSelectByTag = (tag: string) => {
+    const matching = accounts
+      .filter((a) => (a.tags ?? []).some((t) => t.toLowerCase() === tag.toLowerCase()))
+      .map((a) => a.userId);
+    setSelectedIds(new Set(matching));
+  };
+
+  // Per-instance session controls
+  const handleFocusAccount = async (userId: number) => {
+    setBusySessions((prev) => ({ ...prev, [userId]: "focus" }));
+    try {
+      await invoke("focus_account_window", { userId });
+    } catch (err) {
+      appendLog("error", `Focus failed: ${String(err)}`);
+    } finally {
+      setBusySessions((prev) => ({ ...prev, [userId]: undefined }));
+    }
+  };
+
+  const handleKillAccount = async (userId: number) => {
+    setBusySessions((prev) => ({ ...prev, [userId]: "kill" }));
+    try {
+      await invoke("kill_account_session", { userId });
+      appendLog("waiting", `Stopped instance for user #${userId}.`);
+    } catch (err) {
+      appendLog("error", `Kill failed: ${String(err)}`);
+    } finally {
+      setBusySessions((prev) => ({ ...prev, [userId]: undefined }));
+    }
+  };
+
+  const handleRejoinAccount = async (userId: number) => {
+    setBusySessions((prev) => ({ ...prev, [userId]: "rejoin" }));
+    try {
+      const updated = await invoke<ActiveSessionInfo>("rejoin_single_account", { userId });
+      appendLog("launched", updated.lastMessage, updated.username);
+    } catch (err) {
+      appendLog("error", `Rejoin failed: ${String(err)}`);
+    } finally {
+      setBusySessions((prev) => ({ ...prev, [userId]: undefined }));
+    }
+  };
+
+  const handleToggleAccountMute = async (userId: number, muted: boolean) => {
+    setBusySessions((prev) => ({ ...prev, [userId]: "mute" }));
+    try {
+      await invoke<boolean>("toggle_account_mute", { userId, muted });
+      setMutedAccounts((prev) => ({ ...prev, [userId]: muted }));
+    } catch (err) {
+      appendLog("error", `Mute toggle failed: ${String(err)}`);
+    } finally {
+      setBusySessions((prev) => ({ ...prev, [userId]: undefined }));
+    }
+  };
+
+  // Favorites
+  const handleToggleFavorite = async (game: GameSearchResult) => {
+    const isFav = appConfig.favorites.some((f) => f.placeId === game.placeId);
+    try {
+      if (isFav) {
+        const nextCfg = await invoke<AppConfig>("remove_favorite_game", {
+          placeId: game.placeId,
+        });
+        setAppConfig(nextCfg);
+        appendLog("info", `Removed "${game.name}" from Favorites.`);
+      } else {
+        const vip =
+          privateServerLink.trim() && vipValidation.valid ? privateServerLink.trim() : null;
+        const favorite: FavoriteGame = {
+          placeId: game.placeId,
+          universeId: game.universeId,
+          name: game.name,
+          iconUrl: game.iconUrl,
+          privateServerLink: vip,
+        };
+        const nextCfg = await invoke<AppConfig>("save_favorite_game", { favorite });
+        setAppConfig(nextCfg);
+        appendLog(
+          "launched",
+          `Saved "${game.name}"${vip ? " (with VIP link)" : ""} to Favorites.`,
+        );
+      }
+    } catch (err) {
+      appendLog("error", `Favorites update failed: ${String(err)}`);
+    }
+  };
+
+  const handleSelectFavorite = (fav: FavoriteGame) => {
+    setSelectedGame({
+      universeId: fav.universeId,
+      placeId: fav.placeId,
+      name: fav.name,
+      creatorName: "Favorite",
+      playing: 0,
+      visits: 0,
+      maxPlayers: 0,
+      iconUrl: fav.iconUrl,
+    });
+    setPrivateServerLink(fav.privateServerLink ?? "");
+    if (fav.privateServerLink) {
+      setJobId("");
+    }
+  };
+
+  const handleRemoveFavorite = async (placeId: number) => {
+    try {
+      const nextCfg = await invoke<AppConfig>("remove_favorite_game", { placeId });
+      setAppConfig(nextCfg);
+    } catch (err) {
+      appendLog("error", `Failed to remove favorite: ${String(err)}`);
+    }
+  };
+
+  // Launch helper
+  const executeLaunch = async (params: {
+    userIds: number[];
+    game: GameSearchResult;
+    vipLink: string | null;
+    targetJobId: string | null;
+    sameServer: boolean;
+    delay: number;
+    autoArrange: boolean;
+    monitorId: string | null;
+    activeMuteMode: MuteMode;
+  }) => {
+    setIsLaunching(true);
+    appendLog(
+      "info",
+      `Starting launch of ${params.userIds.length} account(s) into "${params.game.name}"${params.vipLink ? " (Private Server)" : params.sameServer ? " (Same Server)" : ""} with ${params.delay}s delay...`,
+    );
+
+    try {
+      await invoke("launch_accounts", {
+        userIds: params.userIds,
+        placeId: params.game.placeId,
+        jobId: params.vipLink ? null : params.targetJobId,
+        privateServerLink: params.vipLink,
+        delaySeconds: params.delay,
+        autoArrange: params.autoArrange,
+        joinSameServer: params.sameServer,
+        monitorId: params.monitorId,
+        muteMode: params.activeMuteMode,
+      });
+    } catch (err) {
+      setIsLaunching(false);
+      appendLog("error", `Failed to start launch: ${String(err)}`);
+    }
+  };
+
   const handleLaunch = async () => {
     if (!selectedGame || selectedIds.size === 0 || !vipValidation.valid) return;
 
     const orderedUserIds = accounts
       .filter((a) => selectedIds.has(a.userId))
       .map((a) => a.userId);
-
     const vipTrimmed = privateServerLink.trim() || null;
+    const jobTrimmed = jobId.trim() || null;
 
-    setIsLaunching(true);
-    appendLog(
-      "info",
-      `Starting launch of ${orderedUserIds.length} account(s) into "${selectedGame.name}"${vipTrimmed ? " (Private Server)" : ""} with ${delaySeconds}s delay...`,
-    );
-
-    try {
-      await invoke("launch_accounts", {
-        userIds: orderedUserIds,
-        placeId: selectedGame.placeId,
-        jobId: vipTrimmed ? null : jobId.trim() || null,
-        privateServerLink: vipTrimmed,
-        delaySeconds,
-        autoArrange: rejoinConfig.autoArrange,
-      });
-    } catch (err) {
-      setIsLaunching(false);
-      appendLog("error", `Failed to start launch: ${String(err)}`);
-    }
+    await executeLaunch({
+      userIds: orderedUserIds,
+      game: selectedGame,
+      vipLink: vipTrimmed,
+      targetJobId: jobTrimmed,
+      sameServer: !vipTrimmed && !jobTrimmed && joinSameServer,
+      delay: delaySeconds,
+      autoArrange: rejoinConfig.autoArrange,
+      monitorId: selectedMonitorId,
+      activeMuteMode: muteMode,
+    });
   };
 
   const handleCancelLaunch = async () => {
@@ -416,6 +616,116 @@ export function App() {
     }
   };
 
+  // Profiles
+  const handleSaveProfile = async (name: string) => {
+    if (!selectedGame || selectedIds.size === 0) return;
+    const orderedUserIds = accounts
+      .filter((a) => selectedIds.has(a.userId))
+      .map((a) => a.userId);
+
+    const profile: LaunchProfile = {
+      id: "",
+      name,
+      userIds: orderedUserIds,
+      placeId: selectedGame.placeId,
+      universeId: selectedGame.universeId,
+      gameName: selectedGame.name,
+      gameIconUrl: selectedGame.iconUrl,
+      privateServerLink: privateServerLink.trim() || null,
+      jobId: jobId.trim() || null,
+      joinSameServer,
+      delaySeconds,
+      fpsCap: performance.fpsCap,
+      lowCpuMode: performance.lowCpuMode,
+      autoRejoinEnabled: rejoinConfig.enabled,
+      autoRejoinIntervalMinutes: rejoinConfig.intervalMinutes,
+      autoArrange: rejoinConfig.autoArrange,
+      monitorId: selectedMonitorId,
+      muteMode,
+    };
+
+    try {
+      const nextCfg = await invoke<AppConfig>("save_launch_profile", { profile });
+      setAppConfig(nextCfg);
+      appendLog("launched", `Saved launch profile "${name}".`);
+    } catch (err) {
+      appendLog("error", `Failed to save profile: ${String(err)}`);
+    }
+  };
+
+  const handleDeleteProfile = async (id: string) => {
+    try {
+      const nextCfg = await invoke<AppConfig>("delete_launch_profile", { id });
+      setAppConfig(nextCfg);
+    } catch (err) {
+      appendLog("error", `Failed to delete profile: ${String(err)}`);
+    }
+  };
+
+  const handleRunProfile = async (profile: LaunchProfile) => {
+    const validAccountIds = new Set(accounts.map((a) => a.userId));
+    const runnableIds = profile.userIds.filter((id) => validAccountIds.has(id));
+    if (runnableIds.length === 0) {
+      appendLog(
+        "error",
+        `Profile "${profile.name}" has no matching saved accounts. Add or update accounts first.`,
+      );
+      return;
+    }
+
+    const game: GameSearchResult = {
+      universeId: profile.universeId ?? 0,
+      placeId: profile.placeId,
+      name: profile.gameName,
+      creatorName: "Profile",
+      playing: 0,
+      visits: 0,
+      maxPlayers: 0,
+      iconUrl: profile.gameIconUrl,
+    };
+
+    // Load profile settings into UI state
+    setSelectedIds(new Set(runnableIds));
+    setSelectedGame(game);
+    setPrivateServerLink(profile.privateServerLink ?? "");
+    setJobId(profile.jobId ?? "");
+    setJoinSameServer(profile.joinSameServer);
+    setDelaySeconds(profile.delaySeconds);
+    if (profile.monitorId) {
+      setSelectedMonitorId(profile.monitorId);
+    }
+    setMuteMode(profile.muteMode);
+
+    // Apply performance, rejoin, and mute settings before launching
+    const nextPerf: PerformanceSettings = {
+      fpsCap: profile.fpsCap,
+      lowCpuMode: profile.lowCpuMode,
+    };
+    const nextRejoin: AutoRejoinConfig = {
+      enabled: profile.autoRejoinEnabled,
+      intervalMinutes: profile.autoRejoinIntervalMinutes,
+      autoArrange: profile.autoArrange,
+    };
+
+    await handleApplyPerformance(nextPerf);
+    await handleUpdateRejoinConfig(nextRejoin);
+    await handleChangeMuteMode(profile.muteMode);
+
+    await executeLaunch({
+      userIds: runnableIds,
+      game,
+      vipLink: profile.privateServerLink,
+      targetJobId: profile.jobId,
+      sameServer:
+        !profile.privateServerLink && !profile.jobId && profile.joinSameServer,
+      delay: profile.delaySeconds,
+      autoArrange: profile.autoArrange,
+      monitorId: profile.monitorId ?? selectedMonitorId,
+      activeMuteMode: profile.muteMode,
+    });
+  };
+
+  // Auto Rejoin, Grid, Monitor, Audio & Performance handlers
   const handleUpdateRejoinConfig = async (next: AutoRejoinConfig) => {
     setRejoinConfig(next);
     try {
@@ -446,10 +756,27 @@ export function App() {
     }
   };
 
+  const handleSelectMonitor = async (monitorId: string | null) => {
+    setSelectedMonitorId(monitorId);
+    try {
+      const nextCfg = await invoke<AppConfig>("update_app_settings", {
+        settings: {
+          ...appConfig.appSettings,
+          defaultMonitorId: monitorId,
+        },
+      });
+      setAppConfig(nextCfg);
+    } catch {
+      // Non-fatal
+    }
+  };
+
   const handleArrangeWindows = async () => {
     setArranging(true);
     try {
-      const res = await invoke<ArrangeWindowsResult>("arrange_windows");
+      const res = await invoke<ArrangeWindowsResult>("arrange_windows", {
+        monitorId: selectedMonitorId,
+      });
       if (res.arrangedCount === 0) {
         appendLog("info", "No visible Roblox windows found to arrange.");
       } else {
@@ -462,6 +789,28 @@ export function App() {
       appendLog("error", `Failed to arrange windows: ${String(err)}`);
     } finally {
       setArranging(false);
+    }
+  };
+
+  const handleChangeMuteMode = async (mode: MuteMode) => {
+    setMuteMode(mode);
+    setApplyingMute(true);
+    try {
+      const res = await invoke<AudioApplyResult>("apply_audio_mute_mode", { mode });
+      const label =
+        mode === "off"
+          ? "Normal Sound"
+          : mode === "mute_all"
+            ? "Mute All"
+            : "Mute Alts (Keep 1st)";
+      appendLog(
+        "info",
+        `Audio mode set to ${label} (${res.mutedCount} muted, ${res.unmutedCount} unmuted).`,
+      );
+    } catch (err) {
+      appendLog("error", `Audio mute error: ${String(err)}`);
+    } finally {
+      setApplyingMute(false);
     }
   };
 
@@ -494,13 +843,40 @@ export function App() {
     }
   };
 
+  // App Settings Modal handlers
+  const handleSaveSettings = async (next: AppSettings) => {
+    const updated = await invoke<AppConfig>("update_app_settings", {
+      settings: {
+        ...next,
+        defaultMonitorId: selectedMonitorId,
+        muteMode,
+      },
+    });
+    setAppConfig(updated);
+    appendLog("launched", "RoMulti settings saved.");
+  };
+
+  const handleTestWebhook = async (url: string) => {
+    await invoke("test_discord_webhook", { url });
+  };
+
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-zinc-950 text-zinc-100">
       <TopBar
         mutexStatus={mutexStatus}
         onRefreshMutex={loadMutexStatus}
         onReacquireMutex={handleReacquireMutex}
+        onOpenSettings={() => setSettingsOpen(true)}
         reacquiring={reacquiring}
+      />
+
+      <ProfilesBar
+        profiles={appConfig.profiles}
+        canSaveCurrent={selectedGame !== null && selectedIds.size > 0 && vipValidation.valid}
+        disabled={isLaunching}
+        onSaveProfile={handleSaveProfile}
+        onRunProfile={handleRunProfile}
+        onDeleteProfile={handleDeleteProfile}
       />
 
       <main className="flex min-h-0 flex-1 overflow-hidden">
@@ -509,6 +885,8 @@ export function App() {
           selectedIds={selectedIds}
           verifyStates={verifyStates}
           sessions={sessions}
+          mutedAccounts={mutedAccounts}
+          busySessions={busySessions}
           isAuthenticating={isAuthenticating}
           authMessage={authMessage}
           authError={authError}
@@ -517,8 +895,14 @@ export function App() {
           onToggleSelect={handleToggleSelect}
           onSelectAll={handleSelectAll}
           onSelectNone={handleSelectNone}
+          onSelectByTag={handleSelectByTag}
+          onUpdateTags={handleUpdateTags}
           onRemoveAccount={handleRemoveAccount}
           onVerifyAccount={handleVerifyAccount}
+          onFocusAccount={handleFocusAccount}
+          onRejoinAccount={handleRejoinAccount}
+          onKillAccount={handleKillAccount}
+          onToggleAccountMute={handleToggleAccountMute}
           onDismissAuthError={() => setAuthError(null)}
         />
 
@@ -526,8 +910,11 @@ export function App() {
           query={query}
           jobId={jobId}
           privateServerLink={privateServerLink}
+          joinSameServer={joinSameServer}
+          selectedAccountCount={selectedIds.size}
           vipValidation={vipValidation}
           results={results}
+          favorites={appConfig.favorites}
           selectedGame={selectedGame}
           searching={searching}
           searchError={searchError}
@@ -535,8 +922,12 @@ export function App() {
           onQueryChange={setQuery}
           onJobIdChange={setJobId}
           onPrivateServerLinkChange={setPrivateServerLink}
+          onJoinSameServerChange={setJoinSameServer}
           onSearchSubmit={() => executeSearch(query)}
           onSelectGame={setSelectedGame}
+          onToggleFavorite={handleToggleFavorite}
+          onSelectFavorite={handleSelectFavorite}
+          onRemoveFavorite={handleRemoveFavorite}
         />
       </main>
 
@@ -551,8 +942,12 @@ export function App() {
         logs={logs}
         rejoinConfig={rejoinConfig}
         performance={performance}
+        monitors={monitors}
+        selectedMonitorId={selectedMonitorId}
+        muteMode={muteMode}
         applyingPerf={applyingPerf}
         arranging={arranging}
+        applyingMute={applyingMute}
         onDelayChange={setDelaySeconds}
         onLaunch={handleLaunch}
         onCancelLaunch={handleCancelLaunch}
@@ -560,7 +955,17 @@ export function App() {
         onUpdateRejoinConfig={handleUpdateRejoinConfig}
         onStopAutoRejoin={handleStopAutoRejoin}
         onArrangeWindows={handleArrangeWindows}
+        onSelectMonitor={handleSelectMonitor}
+        onChangeMuteMode={handleChangeMuteMode}
         onApplyPerformance={handleApplyPerformance}
+      />
+
+      <SettingsModal
+        open={settingsOpen}
+        settings={appConfig.appSettings}
+        onClose={() => setSettingsOpen(false)}
+        onSave={handleSaveSettings}
+        onTestWebhook={handleTestWebhook}
       />
     </div>
   );

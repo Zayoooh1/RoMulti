@@ -2,14 +2,21 @@ import {
   AlertCircle,
   Check,
   CheckCircle2,
+  Eye,
   Loader2,
   Plus,
   RefreshCw,
   RotateCw,
+  Square,
+  Tag,
   Trash2,
   User,
   Users,
+  Volume2,
+  VolumeX,
+  X,
 } from "lucide-react";
+import { useMemo, useState } from "react";
 import type { ActiveSessionInfo, PublicAccount } from "../types";
 
 export type AccountVerifyState =
@@ -23,6 +30,8 @@ interface AccountsPanelProps {
   selectedIds: Set<number>;
   verifyStates: Record<number, AccountVerifyState>;
   sessions: Record<number, ActiveSessionInfo>;
+  mutedAccounts: Record<number, boolean>;
+  busySessions: Record<number, string | undefined>;
   isAuthenticating: boolean;
   authMessage: string | null;
   authError: string | null;
@@ -31,8 +40,14 @@ interface AccountsPanelProps {
   onToggleSelect: (userId: number) => void;
   onSelectAll: () => void;
   onSelectNone: () => void;
+  onSelectByTag: (tag: string) => void;
+  onUpdateTags: (userId: number, tags: string[]) => Promise<void>;
   onRemoveAccount: (userId: number) => void;
   onVerifyAccount: (userId: number) => void;
+  onFocusAccount: (userId: number) => void;
+  onRejoinAccount: (userId: number) => void;
+  onKillAccount: (userId: number) => void;
+  onToggleAccountMute: (userId: number, muted: boolean) => void;
   onDismissAuthError: () => void;
 }
 
@@ -91,6 +106,8 @@ export function AccountsPanel({
   selectedIds,
   verifyStates,
   sessions,
+  mutedAccounts,
+  busySessions,
   isAuthenticating,
   authMessage,
   authError,
@@ -99,14 +116,53 @@ export function AccountsPanel({
   onToggleSelect,
   onSelectAll,
   onSelectNone,
+  onSelectByTag,
+  onUpdateTags,
   onRemoveAccount,
   onVerifyAccount,
+  onFocusAccount,
+  onRejoinAccount,
+  onKillAccount,
+  onToggleAccountMute,
   onDismissAuthError,
 }: AccountsPanelProps) {
+  const [editingTagsUserId, setEditingTagsUserId] = useState<number | null>(null);
+  const [tagsDraft, setTagsDraft] = useState("");
+  const [savingTags, setSavingTags] = useState(false);
+
   const selectedCount = selectedIds.size;
 
+  const allTags = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const acc of accounts) {
+      for (const t of acc.tags ?? []) {
+        counts.set(t, (counts.get(t) ?? 0) + 1);
+      }
+    }
+    return Array.from(counts.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [accounts]);
+
+  const startEditTags = (account: PublicAccount) => {
+    setEditingTagsUserId(account.userId);
+    setTagsDraft((account.tags ?? []).join(", "));
+  };
+
+  const handleSaveTags = async (userId: number) => {
+    const parsed = tagsDraft
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    setSavingTags(true);
+    try {
+      await onUpdateTags(userId, parsed);
+      setEditingTagsUserId(null);
+    } finally {
+      setSavingTags(false);
+    }
+  };
+
   return (
-    <aside className="flex w-[350px] shrink-0 flex-col border-r border-zinc-800/80 bg-zinc-950/60">
+    <aside className="flex w-[360px] shrink-0 flex-col border-r border-zinc-800/80 bg-zinc-950/60">
       {/* Panel Header */}
       <div className="border-b border-zinc-800/80 p-4">
         <div className="mb-3 flex items-center justify-between">
@@ -158,6 +214,26 @@ export function AccountsPanel({
             </button>
           </div>
         </div>
+
+        {/* Tag Quick-Select Bar */}
+        {allTags.length > 0 && (
+          <div className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-zinc-800/70 pt-2.5">
+            <Tag className="h-3 w-3 shrink-0 text-zinc-500" />
+            {allTags.map(([tag, count]) => (
+              <button
+                key={tag}
+                type="button"
+                disabled={disabled}
+                onClick={() => onSelectByTag(tag)}
+                title={`Select all accounts tagged "${tag}"`}
+                className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900/80 px-2 py-0.5 text-[11px] font-medium text-zinc-300 transition hover:border-emerald-500/40 hover:bg-emerald-500/10 hover:text-emerald-300 disabled:opacity-45"
+              >
+                <span>{tag}</span>
+                <span className="text-[10px] text-zinc-500">{count}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Auth Status / Error notifications */}
@@ -203,97 +279,247 @@ export function AccountsPanel({
               const isSelected = selectedIds.has(account.userId);
               const verify = verifyStates[account.userId] ?? { status: "idle" };
               const session = sessions[account.userId];
+              const isMuted = mutedAccounts[account.userId] ?? false;
+              const busyAction = busySessions[account.userId];
+              const isEditingTags = editingTagsUserId === account.userId;
+              const hasActiveSession =
+                session &&
+                (session.status === "in_game" ||
+                  session.status === "error" ||
+                  session.status === "rejoining");
 
               return (
                 <li
                   key={account.userId}
-                  onClick={() => !disabled && onToggleSelect(account.userId)}
-                  className={`group flex cursor-pointer items-center gap-3 rounded-xl border p-2.5 transition ${
+                  onClick={() => !disabled && !isEditingTags && onToggleSelect(account.userId)}
+                  className={`group rounded-xl border p-2.5 transition ${
                     isSelected
                       ? "border-emerald-500/40 bg-emerald-500/[0.08]"
                       : "border-zinc-800/80 bg-zinc-900/50 hover:border-zinc-700 hover:bg-zinc-900"
-                  } ${disabled ? "pointer-events-none opacity-70" : ""}`}
+                  } ${disabled ? "opacity-80" : "cursor-pointer"}`}
                 >
-                  {/* Custom Checkbox */}
-                  <div
-                    className={`flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded border transition ${
-                      isSelected
-                        ? "border-emerald-500 bg-emerald-500 text-zinc-950"
-                        : "border-zinc-600 bg-zinc-950 group-hover:border-zinc-400"
-                    }`}
-                  >
-                    {isSelected && <Check className="h-3 w-3 stroke-[3]" />}
-                  </div>
+                  <div className="flex items-center gap-2.5">
+                    {/* Custom Checkbox */}
+                    <div
+                      className={`flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded border transition ${
+                        isSelected
+                          ? "border-emerald-500 bg-emerald-500 text-zinc-950"
+                          : "border-zinc-600 bg-zinc-950 group-hover:border-zinc-400"
+                      }`}
+                    >
+                      {isSelected && <Check className="h-3 w-3 stroke-[3]" />}
+                    </div>
 
-                  {/* Avatar */}
-                  <div className="relative h-10 w-10 shrink-0 overflow-hidden rounded-full bg-zinc-800 ring-1 ring-zinc-700/80">
-                    {account.avatarUrl ? (
-                      <img
-                        src={account.avatarUrl}
-                        alt={account.username}
-                        className="h-full w-full object-cover"
-                        loading="lazy"
-                      />
-                    ) : (
-                      <div className="flex h-full w-full items-center justify-center text-xs font-bold text-zinc-400">
-                        {account.username.slice(0, 2).toUpperCase()}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Identity + Compact Session Status */}
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <p className="truncate text-sm font-medium text-zinc-100">
-                        {account.displayName || account.username}
-                      </p>
-                      {verify.status === "valid" && !session && (
-                        <CheckCircle2
-                          className="h-3.5 w-3.5 shrink-0 text-emerald-400"
-                          aria-label="Session valid"
+                    {/* Avatar */}
+                    <div className="relative h-9 w-9 shrink-0 overflow-hidden rounded-full bg-zinc-800 ring-1 ring-zinc-700/80">
+                      {account.avatarUrl ? (
+                        <img
+                          src={account.avatarUrl}
+                          alt={account.username}
+                          className="h-full w-full object-cover"
+                          loading="lazy"
                         />
-                      )}
-                      {verify.status === "invalid" && (
-                        <span
-                          className="shrink-0 rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-300"
-                          title={verify.error}
-                        >
-                          Expired
-                        </span>
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center text-xs font-bold text-zinc-400">
+                          {account.username.slice(0, 2).toUpperCase()}
+                        </div>
                       )}
                     </div>
-                    <div className="mt-0.5 flex items-center gap-1.5">
-                      <p className="truncate text-xs text-zinc-500">@{account.username}</p>
-                      {session && <SessionStatusBadge session={session} />}
+
+                    {/* Identity + Compact Session Status */}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <p className="truncate text-sm font-medium text-zinc-100">
+                          {account.displayName || account.username}
+                        </p>
+                        {verify.status === "valid" && !session && (
+                          <CheckCircle2
+                            className="h-3.5 w-3.5 shrink-0 text-emerald-400"
+                            aria-label="Session valid"
+                          />
+                        )}
+                        {verify.status === "invalid" && (
+                          <span
+                            className="shrink-0 rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-300"
+                            title={verify.error}
+                          >
+                            Expired
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-1.5">
+                        <p className="truncate text-xs text-zinc-500">@{account.username}</p>
+                        {session && <SessionStatusBadge session={session} />}
+                      </div>
+                    </div>
+
+                    {/* Row Actions */}
+                    <div
+                      className="flex shrink-0 items-center gap-0.5 opacity-70 transition group-hover:opacity-100"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => startEditTags(account)}
+                        disabled={disabled}
+                        className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-emerald-300 disabled:opacity-40"
+                        title="Edit account tags (e.g. Main, Farm, Trade)"
+                      >
+                        <Tag className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onVerifyAccount(account.userId)}
+                        disabled={verify.status === "checking" || disabled}
+                        className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40"
+                        title="Verify cookie & refresh profile"
+                      >
+                        <RefreshCw
+                          className={`h-3.5 w-3.5 ${verify.status === "checking" ? "animate-spin text-emerald-400" : ""}`}
+                        />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onRemoveAccount(account.userId)}
+                        disabled={disabled}
+                        className="rounded-md p-1.5 text-zinc-400 transition hover:bg-red-500/15 hover:text-red-400 disabled:opacity-40"
+                        title="Remove account"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
                     </div>
                   </div>
 
-                  {/* Row Actions */}
-                  <div
-                    className="flex shrink-0 items-center gap-1 opacity-70 transition group-hover:opacity-100"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => onVerifyAccount(account.userId)}
-                      disabled={verify.status === "checking" || disabled}
-                      className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40"
-                      title="Verify cookie & refresh profile"
+                  {/* Tags display or inline editor */}
+                  {isEditingTags ? (
+                    <form
+                      onClick={(e) => e.stopPropagation()}
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        handleSaveTags(account.userId);
+                      }}
+                      className="mt-2 flex items-center gap-1.5 pl-7"
                     >
-                      <RefreshCw
-                        className={`h-3.5 w-3.5 ${verify.status === "checking" ? "animate-spin text-emerald-400" : ""}`}
+                      <input
+                        type="text"
+                        autoFocus
+                        value={tagsDraft}
+                        onChange={(e) => setTagsDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") setEditingTagsUserId(null);
+                        }}
+                        placeholder="Main, Farm, Trade..."
+                        className="min-w-0 flex-1 rounded-md border border-emerald-500/50 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-100 placeholder-zinc-500 outline-none"
                       />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onRemoveAccount(account.userId)}
-                      disabled={disabled}
-                      className="rounded-md p-1.5 text-zinc-400 transition hover:bg-red-500/15 hover:text-red-400 disabled:opacity-40"
-                      title="Remove account"
+                      <button
+                        type="submit"
+                        disabled={savingTags}
+                        className="rounded-md bg-emerald-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+                      >
+                        {savingTags ? <Loader2 className="h-3 w-3 animate-spin" /> : "Save"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditingTagsUserId(null)}
+                        className="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </form>
+                  ) : (
+                    account.tags &&
+                    account.tags.length > 0 && (
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1 pl-7">
+                        {account.tags.map((tag) => (
+                          <span
+                            key={tag}
+                            className="rounded bg-zinc-800/90 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400"
+                          >
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    )
+                  )}
+
+                  {/* Per-Instance Session Controls (Focus / Mute / Rejoin / Kill) */}
+                  {hasActiveSession && (
+                    <div
+                      className="mt-2 flex items-center justify-between gap-2 border-t border-zinc-800/70 pt-2 pl-7"
+                      onClick={(e) => e.stopPropagation()}
                     >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
+                      <span className="truncate font-mono text-[10px] text-zinc-500">
+                        {session.pid ? `PID ${session.pid}` : `Place ${session.placeId}`}
+                      </span>
+
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          disabled={!session.pid || Boolean(busyAction)}
+                          onClick={() => onFocusAccount(account.userId)}
+                          className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-950/80 px-1.5 py-0.5 text-[10px] font-medium text-zinc-300 transition hover:border-emerald-500/40 hover:text-emerald-300 disabled:cursor-not-allowed disabled:opacity-40"
+                          title="Bring this Roblox window to front"
+                        >
+                          {busyAction === "focus" ? (
+                            <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                          ) : (
+                            <Eye className="h-2.5 w-2.5" />
+                          )}
+                          <span>Focus</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={!session.pid || Boolean(busyAction)}
+                          onClick={() => onToggleAccountMute(account.userId, !isMuted)}
+                          className={`inline-flex items-center justify-center rounded-md border px-1.5 py-0.5 text-[10px] transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                            isMuted
+                              ? "border-amber-500/40 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25"
+                              : "border-zinc-800 bg-zinc-950/80 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                          }`}
+                          title={isMuted ? "Unmute this Roblox instance" : "Mute this Roblox instance"}
+                        >
+                          {busyAction === "mute" ? (
+                            <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                          ) : isMuted ? (
+                            <VolumeX className="h-2.5 w-2.5" />
+                          ) : (
+                            <Volume2 className="h-2.5 w-2.5" />
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={Boolean(busyAction)}
+                          onClick={() => onRejoinAccount(account.userId)}
+                          className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-950/80 px-1.5 py-0.5 text-[10px] font-medium text-zinc-300 transition hover:border-amber-500/40 hover:text-amber-300 disabled:cursor-not-allowed disabled:opacity-40"
+                          title="Restart & rejoin this account into its saved session"
+                        >
+                          {busyAction === "rejoin" ? (
+                            <Loader2 className="h-2.5 w-2.5 animate-spin text-amber-400" />
+                          ) : (
+                            <RotateCw className="h-2.5 w-2.5" />
+                          )}
+                          <span>Rejoin</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={Boolean(busyAction)}
+                          onClick={() => onKillAccount(account.userId)}
+                          className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-950/80 px-1.5 py-0.5 text-[10px] font-medium text-zinc-300 transition hover:border-red-500/40 hover:bg-red-500/15 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-40"
+                          title="Kill this Roblox process and stop Auto Rejoin for this account"
+                        >
+                          {busyAction === "kill" ? (
+                            <Loader2 className="h-2.5 w-2.5 animate-spin text-red-400" />
+                          ) : (
+                            <Square className="h-2.5 w-2.5 fill-current" />
+                          )}
+                          <span>Kill</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </li>
               );
             })}

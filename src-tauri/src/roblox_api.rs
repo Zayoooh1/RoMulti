@@ -24,7 +24,42 @@ pub struct UserPresence {
     pub user_presence_type: u8,
     pub place_id: Option<u64>,
     pub root_place_id: Option<u64>,
+    pub game_id: Option<String>,
     pub last_location: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicServerInfo {
+    pub id: String,
+    pub playing: u32,
+    pub max_players: u32,
+    pub ping: Option<u32>,
+    pub fps: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicServersPage {
+    pub servers: Vec<PublicServerInfo>,
+    pub next_page_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublicServerRaw {
+    id: String,
+    playing: Option<u32>,
+    max_players: Option<u32>,
+    ping: Option<u32>,
+    fps: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublicServersApiResponse {
+    next_page_cursor: Option<String>,
+    data: Vec<PublicServerRaw>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -576,6 +611,77 @@ impl RobloxApiClient {
         }
 
         share_code.to_string()
+    }
+
+    /// Fetches public servers for a Roblox experience with pagination & sortOrder (`Asc` or `Desc`).
+    pub async fn fetch_public_servers(
+        &self,
+        place_id: u64,
+        sort_order: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<PublicServersPage, String> {
+        if place_id == 0 {
+            return Err("Invalid PlaceId.".to_string());
+        }
+
+        let order = if sort_order.eq_ignore_ascii_case("desc") {
+            "Desc"
+        } else {
+            "Asc"
+        };
+        let valid_limit = match limit {
+            10 | 25 | 50 | 100 => limit,
+            _ => 50,
+        };
+
+        let mut url = format!(
+            "https://games.roblox.com/v1/games/{place_id}/servers/Public?sortOrder={order}&limit={valid_limit}&excludeFullGames=true"
+        );
+        if let Some(c) = cursor.map(str::trim).filter(|s| !s.is_empty()) {
+            url.push_str("&cursor=");
+            url.push_str(&urlencoding::encode(c));
+        }
+
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Network error fetching public servers: {e}"))?;
+
+        let status = resp.status();
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return Err("Roblox Games API rate-limited this request (HTTP 429). Wait a few seconds and try again.".to_string());
+        }
+        if !status.is_success() {
+            return Err(format!(
+                "Roblox Public Servers API returned HTTP {status}."
+            ));
+        }
+
+        let parsed = resp
+            .json::<PublicServersApiResponse>()
+            .await
+            .map_err(|e| format!("Failed to parse public servers response: {e}"))?;
+
+        let servers = parsed
+            .data
+            .into_iter()
+            .filter(|s| !s.id.is_empty())
+            .map(|s| PublicServerInfo {
+                id: s.id,
+                playing: s.playing.unwrap_or(0),
+                max_players: s.max_players.unwrap_or(0),
+                ping: s.ping,
+                fps: s.fps,
+            })
+            .collect();
+
+        Ok(PublicServersPage {
+            servers,
+            next_page_cursor: parsed.next_page_cursor,
+        })
     }
 }
 

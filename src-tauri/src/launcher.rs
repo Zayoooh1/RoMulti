@@ -1,3 +1,6 @@
+use crate::audio;
+use crate::config::{ConfigStorage, MuteMode};
+use crate::notifications::NotificationManager;
 use crate::optimizer::{apply_priority_to_pid, PerformanceManager};
 use crate::rejoin::{AutoRejoinManager, SessionStatus};
 use crate::roblox_api::RobloxApiClient;
@@ -91,12 +94,17 @@ impl LaunchManager {
         api: Arc<RobloxApiClient>,
         rejoin_manager: Arc<AutoRejoinManager>,
         performance: Arc<PerformanceManager>,
+        config_storage: Arc<ConfigStorage>,
+        notifications: Arc<NotificationManager>,
         user_ids: Vec<u64>,
         place_id: u64,
         job_id: Option<String>,
         private_server_link: Option<String>,
         delay_seconds: u64,
         auto_arrange: bool,
+        join_same_server: bool,
+        monitor_id: Option<String>,
+        mute_mode: Option<MuteMode>,
     ) -> Result<(), String> {
         if user_ids.is_empty() {
             return Err("Select at least one account to launch.".to_string());
@@ -128,12 +136,20 @@ impl LaunchManager {
             .map(|j| j.trim().to_string())
             .filter(|j| !j.is_empty());
         let delay = delay_seconds.clamp(1, 60);
+        let effective_monitor_id = monitor_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| config_storage.get_app_settings().default_monitor_id);
+        let effective_mute_mode = mute_mode.unwrap_or_else(|| config_storage.get_app_settings().mute_mode);
 
         tauri::async_runtime::spawn(async move {
             let total = user_ids.len();
             let mut launched_count = 0usize;
             let mut failed_count = 0usize;
             let mut cancelled = false;
+            let mut active_job_id = cleaned_job_id;
+            let should_capture_first_server =
+                join_same_server && cleaned_vip.is_none() && active_job_id.is_none() && total > 1;
 
             for (idx, user_id) in user_ids.into_iter().enumerate() {
                 if manager.cancel_requested.load(Ordering::SeqCst) {
@@ -154,7 +170,7 @@ impl LaunchManager {
                     user_id,
                     preview_name.clone(),
                     place_id,
-                    cleaned_job_id.clone(),
+                    active_job_id.clone(),
                     cleaned_vip.clone(),
                     None,
                     SessionStatus::Launching,
@@ -178,12 +194,14 @@ impl LaunchManager {
                 let excluded_pids = rejoin_manager.tracked_pid_set();
                 let low_cpu = performance.is_low_cpu_enabled();
 
+                let mut first_account_launched = false;
+
                 match launch_single_account(
                     &storage,
                     &api,
                     user_id,
                     place_id,
-                    cleaned_job_id.as_deref(),
+                    active_job_id.as_deref(),
                     cleaned_vip.as_deref(),
                     &excluded_pids,
                     low_cpu,
@@ -192,6 +210,9 @@ impl LaunchManager {
                 {
                     Ok(outcome) => {
                         launched_count += 1;
+                        if idx == 0 {
+                            first_account_launched = true;
+                        }
                         let pid_note = outcome
                             .pid
                             .map(|p| format!(" [PID {p}]"))
@@ -207,12 +228,26 @@ impl LaunchManager {
                             user_id,
                             outcome.username.clone(),
                             place_id,
-                            cleaned_job_id.clone(),
+                            active_job_id.clone(),
                             cleaned_vip.clone(),
                             outcome.pid,
                             SessionStatus::InGame,
                             msg.clone(),
                         );
+
+                        if let Some(pid) = outcome.pid {
+                            window_manager::spawn_window_title_setter(
+                                pid,
+                                outcome.username.clone(),
+                            );
+                        }
+                        if effective_mute_mode != MuteMode::Off {
+                            spawn_delayed_mute_apply(
+                                Arc::clone(&rejoin_manager),
+                                Arc::clone(&config_storage),
+                                Some(effective_mute_mode),
+                            );
+                        }
 
                         let _ = app.emit(
                             "launch-progress",
@@ -228,12 +263,20 @@ impl LaunchManager {
                     }
                     Err(err) => {
                         failed_count += 1;
+                        let lower = err.to_lowercase();
+                        if lower.contains("rejected") || lower.contains("expired") {
+                            notifications.notify_expired_cookie(
+                                &config_storage.get_app_settings(),
+                                &preview_name,
+                                &err,
+                            );
+                        }
                         rejoin_manager.upsert_session(
                             &app,
                             user_id,
                             preview_name.clone(),
                             place_id,
-                            cleaned_job_id.clone(),
+                            active_job_id.clone(),
                             cleaned_vip.clone(),
                             None,
                             SessionStatus::Error,
@@ -246,12 +289,108 @@ impl LaunchManager {
                                 index: position,
                                 total,
                                 user_id,
-                                username: preview_name,
+                                username: preview_name.clone(),
                                 status: "error".to_string(),
                                 message: err,
                             },
                         );
                     }
+                }
+
+                // Join Same Server: wait up to ~25s for account #1 to enter a server and grab its gameId
+                if idx == 0 && should_capture_first_server && first_account_launched {
+                    let _ = app.emit(
+                        "launch-progress",
+                        LaunchProgressEvent {
+                            index: position,
+                            total,
+                            user_id,
+                            username: preview_name.clone(),
+                            status: "waiting".to_string(),
+                            message: format!(
+                                "Waiting for @{preview_name} to join a server so remaining accounts join the same JobId..."
+                            ),
+                        },
+                    );
+
+                    if let Ok((_acc, cookie)) = storage.get_account_with_cookie(user_id) {
+                        let deadline = Instant::now() + Duration::from_secs(25);
+                        let mut captured: Option<String> = None;
+
+                        while Instant::now() < deadline {
+                            if manager.cancel_requested.load(Ordering::SeqCst) {
+                                cancelled = true;
+                                break;
+                            }
+
+                            if let Ok(presence) = api.fetch_user_presence(user_id, &cookie).await {
+                                if presence.user_presence_type == 2 {
+                                    if let Some(gid) = presence
+                                        .game_id
+                                        .map(|s| s.trim().to_string())
+                                        .filter(|s| !s.is_empty())
+                                    {
+                                        captured = Some(gid);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // Sleep 2s in 250ms increments so cancel stays responsive
+                            for _ in 0..8 {
+                                if manager.cancel_requested.load(Ordering::SeqCst) {
+                                    cancelled = true;
+                                    break;
+                                }
+                                tokio::time::sleep(Duration::from_millis(250)).await;
+                            }
+                            if cancelled {
+                                break;
+                            }
+                        }
+
+                        if cancelled {
+                            break;
+                        }
+
+                        if let Some(gid) = captured {
+                            active_job_id = Some(gid.clone());
+                            rejoin_manager.update_session_job_id(
+                                &app,
+                                user_id,
+                                Some(gid.clone()),
+                            );
+                            let short_id: String = gid.chars().take(12).collect();
+                            let _ = app.emit(
+                                "launch-progress",
+                                LaunchProgressEvent {
+                                    index: position,
+                                    total,
+                                    user_id,
+                                    username: preview_name.clone(),
+                                    status: "launched".to_string(),
+                                    message: format!(
+                                        "Captured server JobId ({short_id}...) from @{preview_name}. Remaining accounts will join this server."
+                                    ),
+                                },
+                            );
+                        } else {
+                            let _ = app.emit(
+                                "launch-progress",
+                                LaunchProgressEvent {
+                                    index: position,
+                                    total,
+                                    user_id,
+                                    username: preview_name.clone(),
+                                    status: "waiting".to_string(),
+                                    message: format!(
+                                        "Timed out waiting for @{preview_name}'s server JobId (presence may be private). Continuing normal launch."
+                                    ),
+                                },
+                            );
+                        }
+                    }
+                    continue;
                 }
 
                 // Wait configurable delay before launching the next instance
@@ -288,7 +427,13 @@ impl LaunchManager {
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 let tracked = rejoin_manager.tracked_pids();
                 let all_pids = snapshot_roblox_pids();
-                let _ = window_manager::arrange_roblox_windows(&tracked, &all_pids);
+                let pid_usernames = rejoin_manager.tracked_pid_usernames();
+                let _ = window_manager::arrange_roblox_windows(
+                    &tracked,
+                    &all_pids,
+                    effective_monitor_id.as_deref(),
+                    &pid_usernames,
+                );
             }
 
             manager.is_launching.store(false, Ordering::SeqCst);
@@ -306,6 +451,36 @@ impl LaunchManager {
 
         Ok(())
     }
+}
+
+/// Spawns a lightweight background task that applies the active WASAPI mute mode
+/// after ~5s and ~10s, giving newly launched Roblox instances time to register their audio session.
+pub fn spawn_delayed_mute_apply(
+    rejoin_manager: Arc<AutoRejoinManager>,
+    config_storage: Arc<ConfigStorage>,
+    override_mode: Option<MuteMode>,
+) {
+    let initial_mode = override_mode.unwrap_or_else(|| config_storage.get_app_settings().mute_mode);
+    if initial_mode == MuteMode::Off {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        for wait_secs in [5u64, 5u64] {
+            tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+            let mode =
+                override_mode.unwrap_or_else(|| config_storage.get_app_settings().mute_mode);
+            if mode == MuteMode::Off {
+                return;
+            }
+            let tracked = rejoin_manager.tracked_pids();
+            let all_pids = snapshot_roblox_pids();
+            let _ = tokio::task::spawn_blocking(move || {
+                audio::apply_mute_mode(mode, &tracked, &all_pids)
+            })
+            .await;
+        }
+    });
 }
 
 /// Launches a single Roblox account, captures its newly spawned `RobloxPlayerBeta.exe` PID
@@ -353,7 +528,8 @@ pub async fn launch_single_account(
     open_protocol_uri(&uri)?;
 
     // Wait up to 10s for the newly spawned RobloxPlayerBeta.exe process PID
-    let captured_pid = wait_for_new_roblox_pid(&pids_before, Duration::from_secs(PID_CAPTURE_TIMEOUT_SECS)).await;
+    let captured_pid =
+        wait_for_new_roblox_pid(&pids_before, Duration::from_secs(PID_CAPTURE_TIMEOUT_SECS)).await;
 
     // Immediately apply BELOW_NORMAL_PRIORITY_CLASS if Low CPU Mode is active
     if let Some(pid) = captured_pid {

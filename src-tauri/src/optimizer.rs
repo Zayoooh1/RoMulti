@@ -15,22 +15,13 @@ use windows::Win32::{
     },
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PerformanceSettings {
     /// None = Default (remove DFIntTaskSchedulerTargetFps), or explicit cap e.g. 15, 30, 60, 240.
     pub fps_cap: Option<u32>,
     /// Low CPU Mode: BELOW_NORMAL_PRIORITY_CLASS on Roblox processes + lightweight ClientAppSettings FFlags.
     pub low_cpu_mode: bool,
-}
-
-impl Default for PerformanceSettings {
-    fn default() -> Self {
-        Self {
-            fps_cap: None,
-            low_cpu_mode: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -15,6 +15,7 @@ export interface PublicAccount {
   displayName: string;
   avatarUrl: string;
   addedAt: number;
+  tags: string[];
 }
 
 export interface GameSearchResult {
@@ -26,6 +27,82 @@ export interface GameSearchResult {
   visits: number;
   maxPlayers: number;
   iconUrl: string | null;
+}
+
+export interface PublicServerInfo {
+  id: string;
+  playing: number;
+  maxPlayers: number;
+  ping: number | null;
+  fps: number | null;
+}
+
+export interface PublicServersPage {
+  servers: PublicServerInfo[];
+  nextPageCursor: string | null;
+}
+
+export type MuteMode = "off" | "mute_all" | "mute_except_first";
+
+export interface FavoriteGame {
+  placeId: number;
+  universeId: number;
+  name: string;
+  iconUrl: string | null;
+  privateServerLink: string | null;
+}
+
+export interface LaunchProfile {
+  id: string;
+  name: string;
+  userIds: number[];
+  placeId: number;
+  universeId?: number | null;
+  gameName: string;
+  gameIconUrl: string | null;
+  privateServerLink: string | null;
+  jobId: string | null;
+  joinSameServer: boolean;
+  delaySeconds: number;
+  fpsCap: number | null;
+  lowCpuMode: boolean;
+  autoRejoinEnabled: boolean;
+  autoRejoinIntervalMinutes: number;
+  autoArrange: boolean;
+  monitorId: string | null;
+  muteMode: MuteMode;
+}
+
+export interface AppSettings {
+  minimizeToTray: boolean;
+  discordWebhookUrl: string;
+  notifyExpiredCookie: boolean;
+  notifyRejoinFailed: boolean;
+  notifyEveryRejoin: boolean;
+  defaultMonitorId: string | null;
+  muteMode: MuteMode;
+}
+
+export interface AppConfig {
+  favorites: FavoriteGame[];
+  profiles: LaunchProfile[];
+  appSettings: AppSettings;
+}
+
+export interface MonitorInfo {
+  id: string;
+  name: string;
+  isPrimary: boolean;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface AudioApplyResult {
+  mode: MuteMode;
+  mutedCount: number;
+  unmutedCount: number;
 }
 
 export interface AuthStatusPayload {

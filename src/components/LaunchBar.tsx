@@ -9,10 +9,13 @@ import {
   LayoutGrid,
   Link2,
   Loader2,
+  Monitor,
   Play,
   RotateCw,
   Square,
   Terminal,
+  Volume2,
+  VolumeX,
   XCircle,
 } from "lucide-react";
 import { useState } from "react";
@@ -21,6 +24,8 @@ import type {
   GameSearchResult,
   LaunchProgressEvent,
   LogEntry,
+  MonitorInfo,
+  MuteMode,
   PerformanceSettings,
 } from "../types";
 
@@ -35,8 +40,12 @@ interface LaunchBarProps {
   logs: LogEntry[];
   rejoinConfig: AutoRejoinConfig;
   performance: PerformanceSettings;
+  monitors: MonitorInfo[];
+  selectedMonitorId: string | null;
+  muteMode: MuteMode;
   applyingPerf: boolean;
   arranging: boolean;
+  applyingMute: boolean;
   onDelayChange: (seconds: number) => void;
   onLaunch: () => void;
   onCancelLaunch: () => void;
@@ -44,6 +53,8 @@ interface LaunchBarProps {
   onUpdateRejoinConfig: (next: AutoRejoinConfig) => void;
   onStopAutoRejoin: () => void;
   onArrangeWindows: () => void;
+  onSelectMonitor: (monitorId: string | null) => void;
+  onChangeMuteMode: (mode: MuteMode) => void;
   onApplyPerformance: (next: PerformanceSettings) => void;
 }
 
@@ -66,8 +77,12 @@ export function LaunchBar({
   logs,
   rejoinConfig,
   performance,
+  monitors,
+  selectedMonitorId,
+  muteMode,
   applyingPerf,
   arranging,
+  applyingMute,
   onDelayChange,
   onLaunch,
   onCancelLaunch,
@@ -75,6 +90,8 @@ export function LaunchBar({
   onUpdateRejoinConfig,
   onStopAutoRejoin,
   onArrangeWindows,
+  onSelectMonitor,
+  onChangeMuteMode,
   onApplyPerformance,
 }: LaunchBarProps) {
   const [logExpanded, setLogExpanded] = useState(false);
@@ -178,10 +195,10 @@ export function LaunchBar({
         </div>
       )}
 
-      {/* Session Settings Bar: Auto Rejoin | Window Grid | FPS Cap & Low CPU */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/70 bg-zinc-900/40 px-5 py-2 text-xs">
+      {/* Session Settings Bar: Auto Rejoin | Window Grid & Monitor | Audio Mute | FPS & Low CPU */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-zinc-800/70 bg-zinc-900/40 px-5 py-2 text-xs">
         {/* Auto Rejoin Group */}
-        <div className="flex flex-wrap items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2">
           <label className="flex cursor-pointer items-center gap-2 select-none">
             <button
               type="button"
@@ -230,7 +247,7 @@ export function LaunchBar({
                   });
                 }
               }}
-              className="w-9 bg-transparent text-center font-mono text-xs text-zinc-100 outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+              className="w-8 bg-transparent text-center font-mono text-xs text-zinc-100 outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
             />
             <div className="flex flex-col leading-none">
               <button
@@ -270,27 +287,44 @@ export function LaunchBar({
               className="inline-flex items-center gap-1 rounded-md border border-red-500/35 bg-red-500/15 px-2 py-0.5 text-[11px] font-medium text-red-200 transition hover:bg-red-500/25"
             >
               <Square className="h-2.5 w-2.5 fill-current" />
-              Stop Auto Rejoin
+              Stop
             </button>
           )}
         </div>
 
-        {/* Window Grid Arrangement Group */}
-        <div className="flex items-center gap-2.5">
+        {/* Window Grid Arrangement + Monitor Selector */}
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             disabled={arranging}
             onClick={onArrangeWindows}
             className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700/90 bg-zinc-800/80 px-2.5 py-1 text-xs font-medium text-zinc-200 transition hover:border-zinc-600 hover:bg-zinc-700 disabled:opacity-50"
-            title="Arrange all running Roblox windows evenly into a grid"
+            title="Arrange all running Roblox windows evenly into a grid on the selected monitor"
           >
             {arranging ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-400" />
             ) : (
               <LayoutGrid className="h-3.5 w-3.5 text-emerald-400" />
             )}
-            <span>Arrange Windows</span>
+            <span>Arrange</span>
           </button>
+
+          {monitors.length > 0 && (
+            <div className="flex items-center gap-1" title="Target monitor for window grid">
+              <Monitor className="h-3.5 w-3.5 text-zinc-400" />
+              <select
+                value={selectedMonitorId ?? ""}
+                onChange={(e) => onSelectMonitor(e.target.value || null)}
+                className="max-w-[175px] rounded-md border border-zinc-700/90 bg-zinc-900 px-1.5 py-1 text-xs text-zinc-100 outline-none focus:border-emerald-500/60"
+              >
+                {monitors.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <label className="flex cursor-pointer items-center gap-1.5 text-zinc-400 select-none hover:text-zinc-200">
             <input
@@ -304,15 +338,34 @@ export function LaunchBar({
               }
               className="h-3.5 w-3.5 cursor-pointer rounded border-zinc-700 bg-zinc-900 accent-emerald-500"
             />
-            <span>Auto-arrange</span>
+            <span>Auto</span>
           </label>
         </div>
 
-        {/* FPS Cap & Low CPU Mode Group */}
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5">
+        {/* Audio Mute + FPS Cap + Low CPU Mode */}
+        <div className="flex flex-wrap items-center gap-2.5">
+          {/* Audio Mute Mode */}
+          <div className="flex items-center gap-1" title="WASAPI per-instance audio muting">
+            {muteMode === "off" ? (
+              <Volume2 className="h-3.5 w-3.5 text-zinc-400" />
+            ) : (
+              <VolumeX className="h-3.5 w-3.5 text-amber-400" />
+            )}
+            <select
+              value={muteMode}
+              disabled={applyingMute}
+              onChange={(e) => onChangeMuteMode(e.target.value as MuteMode)}
+              className="rounded-md border border-zinc-700/90 bg-zinc-900 px-1.5 py-1 text-xs text-zinc-100 outline-none focus:border-emerald-500/60 disabled:opacity-50"
+            >
+              <option value="off">Sound: Normal</option>
+              <option value="mute_all">Mute All</option>
+              <option value="mute_except_first">Mute Alts (Keep 1st)</option>
+            </select>
+          </div>
+
+          {/* FPS Cap */}
+          <div className="flex items-center gap-1">
             <Gauge className="h-3.5 w-3.5 text-zinc-400" />
-            <span className="text-zinc-400">FPS:</span>
             <select
               value={fpsSelectValue}
               disabled={applyingPerf}
@@ -323,7 +376,7 @@ export function LaunchBar({
                   fpsCap: raw === "default" ? null : Number(raw),
                 });
               }}
-              className="rounded-md border border-zinc-700/90 bg-zinc-900 px-2 py-1 text-xs text-zinc-100 outline-none focus:border-emerald-500/60 disabled:opacity-50"
+              className="rounded-md border border-zinc-700/90 bg-zinc-900 px-1.5 py-1 text-xs text-zinc-100 outline-none focus:border-emerald-500/60 disabled:opacity-50"
             >
               {FPS_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>
@@ -333,8 +386,9 @@ export function LaunchBar({
             </select>
           </div>
 
+          {/* Low CPU Mode */}
           <label
-            className="flex cursor-pointer items-center gap-2 select-none"
+            className="flex cursor-pointer items-center gap-1.5 select-none"
             title="Sets BELOW_NORMAL process priority on Roblox instances and writes lightweight FFlags to ClientAppSettings.json"
           >
             <button
@@ -368,7 +422,7 @@ export function LaunchBar({
                 performance.lowCpuMode ? "text-amber-200" : "text-zinc-300"
               }`}
             >
-              Low CPU Mode
+              Low CPU
             </span>
           </label>
         </div>
@@ -406,8 +460,8 @@ export function LaunchBar({
                   )}
                 </div>
                 <p className="truncate text-xs text-zinc-500">
-                  PlaceId: <span className="font-mono text-zinc-400">{selectedGame.placeId}</span>{" "}
-                  • {selectedGame.playing.toLocaleString()} playing
+                  PlaceId: <span className="font-mono text-zinc-400">{selectedGame.placeId}</span>
+                  {selectedGame.playing > 0 && ` • ${selectedGame.playing.toLocaleString()} playing`}
                 </p>
               </div>
             </>

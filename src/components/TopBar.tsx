@@ -1,10 +1,11 @@
-import { AlertTriangle, Layers, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Layers, RefreshCw, Settings, ShieldAlert, ShieldCheck } from "lucide-react";
 import type { MutexStatus } from "../types";
 
 interface TopBarProps {
   mutexStatus: MutexStatus | null;
   onRefreshMutex: () => void;
   onReacquireMutex: () => void;
+  onOpenSettings: () => void;
   reacquiring: boolean;
 }
 
@@ -12,6 +13,7 @@ export function TopBar({
   mutexStatus,
   onRefreshMutex,
   onReacquireMutex,
+  onOpenSettings,
   reacquiring,
 }: TopBarProps) {
   const isActive = mutexStatus?.active ?? false;
@@ -29,7 +31,7 @@ export function TopBar({
             <div className="flex items-center gap-2">
               <h1 className="text-base font-semibold tracking-tight text-zinc-100">RoMulti</h1>
               <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-zinc-400">
-                v1.0
+                v1.1
               </span>
             </div>
             <p className="text-xs text-zinc-500">Roblox Multi-Instance Launcher &amp; Account Manager</p>
@@ -81,6 +83,15 @@ export function TopBar({
             title="Refresh mutex & process status"
           >
             <RefreshCw className="h-3.5 w-3.5" />
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            className="flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-400 transition hover:border-emerald-500/40 hover:text-emerald-300"
+            title="Settings (System Tray & Discord Webhook)"
+          >
+            <Settings className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>

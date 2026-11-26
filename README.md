@@ -9,8 +9,13 @@
 - **Game Search & Direct PlaceId / URL Lookup** — Search Roblox experiences by name with live active player counts and thumbnails, or paste a numeric `PlaceId` / Roblox game URL directly.
 - **Private Server (VIP) & JobId Support** — Launch multiple accounts straight into a Private Server using either classic (`?privateServerLinkCode=...`) or modern share links (`https://www.roblox.com/share?code=...&type=Server`), or join a specific public server `JobId`.
 - **Auto Rejoin (Minutes + Crash Recovery)** — Automatically rejoins accounts every `N` minutes (preventing 20-minute AFK kicks) while continuously monitoring process PIDs and Roblox Presence API to recover crashes or disconnects immediately, with a 30-second startup grace period and a 3-attempt failure safeguard.
-- **Window Grid Arrangement** — Evenly tiles all running Roblox windows across the desktop work area (excluding the taskbar) on demand or automatically after batch launch / Auto Rejoin.
+- **Window Grid Arrangement & Multi-Monitor Support** — Evenly tiles all running Roblox windows across the desktop work area (excluding the taskbar) on your chosen display monitor, on demand or automatically after batch launch / Auto Rejoin.
 - **FPS Cap & Low CPU Mode** — Writes `DFIntTaskSchedulerTargetFps` (`Default`, `15`, `30`, `60`, `240`) and optional lightweight FFlags to Roblox's `ClientAppSettings.json`, and lowers Roblox process priority to `BELOW_NORMAL_PRIORITY_CLASS` in Low CPU Mode.
+- **Launch Profiles, Account Tags & Favorite Games/VIP** — Tag accounts (e.g. `Main`, `Farm`, `Trade`) for 1-click group selection, star favorite games together with their VIP links, and save complete launch presets (accounts, game, VIP, FPS, Low CPU, Auto Rejoin, monitor, mute mode) to `%APPDATA%\RoMulti\config.json` for 1-click launch.
+- **Window Nickname Labeling & Per-Instance Controls** — Automatically renames each Roblox window title bar to `Roblox — @username` and provides per-account **Focus**, **Mute/Unmute**, **Rejoin**, and **Kill** controls directly in the accounts panel.
+- **Public Server Browser & Join Same Server** — Browse live public servers with player count, ping, FPS, sorting (`Asc`/`Desc`), and minimum free-slot filtering, or enable **Same Server** to automatically capture account #1's server `JobId` and join all remaining accounts into it.
+- **Auto-Mute Instances (Windows WASAPI)** — Mute all Roblox instances or mute alts while keeping the first account audible (`Normal` / `Mute All` / `Mute Alts (Keep 1st)`), plus individual per-account mute toggles.
+- **System Tray & Discord Webhook Alerts** — Optionally minimize RoMulti to the Windows System Tray on close (with quick tray actions for Show/Hide, Arrange Windows, Mute All, Stop Auto Rejoin, and Quit) and receive Discord Webhook embeds for expired `.ROBLOSECURITY` cookies, paused Auto Rejoin retries, or optional rejoin notifications.
 
 ## Tech Stack
 
