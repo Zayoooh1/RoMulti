@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+dist/
+dist-ssr/
+
+# Rust / Tauri build artifacts
+src-tauri/target/
+
+# Sensitive local data / credentials (never commit)
+accounts.json
+*.cookie
+*.cookies
+.env
+.env.*
+auth_sessions/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.local
+*.log

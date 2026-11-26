@@ -1,0 +1,305 @@
+import {
+  AlertCircle,
+  Check,
+  CheckCircle2,
+  Loader2,
+  Plus,
+  RefreshCw,
+  RotateCw,
+  Trash2,
+  User,
+  Users,
+} from "lucide-react";
+import type { ActiveSessionInfo, PublicAccount } from "../types";
+
+export type AccountVerifyState =
+  | { status: "idle" }
+  | { status: "checking" }
+  | { status: "valid" }
+  | { status: "invalid"; error: string };
+
+interface AccountsPanelProps {
+  accounts: PublicAccount[];
+  selectedIds: Set<number>;
+  verifyStates: Record<number, AccountVerifyState>;
+  sessions: Record<number, ActiveSessionInfo>;
+  isAuthenticating: boolean;
+  authMessage: string | null;
+  authError: string | null;
+  disabled: boolean;
+  onAddAccount: () => void;
+  onToggleSelect: (userId: number) => void;
+  onSelectAll: () => void;
+  onSelectNone: () => void;
+  onRemoveAccount: (userId: number) => void;
+  onVerifyAccount: (userId: number) => void;
+  onDismissAuthError: () => void;
+}
+
+function SessionStatusBadge({ session }: { session: ActiveSessionInfo }) {
+  const title = session.pid
+    ? `${session.lastMessage} (PID ${session.pid})`
+    : session.lastMessage;
+
+  switch (session.status) {
+    case "launching":
+      return (
+        <span
+          title={title}
+          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-medium text-sky-300"
+        >
+          <Loader2 className="h-2.5 w-2.5 animate-spin" />
+          Launching
+        </span>
+      );
+    case "in_game":
+      return (
+        <span
+          title={title}
+          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-300"
+        >
+          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+          In Game
+        </span>
+      );
+    case "rejoining":
+      return (
+        <span
+          title={title}
+          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-300"
+        >
+          <RotateCw className="h-2.5 w-2.5 animate-spin" />
+          Rejoining...
+        </span>
+      );
+    case "error":
+      return (
+        <span
+          title={title}
+          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-red-500/30 bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-300"
+        >
+          Error
+        </span>
+      );
+    default:
+      return null;
+  }
+}
+
+export function AccountsPanel({
+  accounts,
+  selectedIds,
+  verifyStates,
+  sessions,
+  isAuthenticating,
+  authMessage,
+  authError,
+  disabled,
+  onAddAccount,
+  onToggleSelect,
+  onSelectAll,
+  onSelectNone,
+  onRemoveAccount,
+  onVerifyAccount,
+  onDismissAuthError,
+}: AccountsPanelProps) {
+  const selectedCount = selectedIds.size;
+
+  return (
+    <aside className="flex w-[350px] shrink-0 flex-col border-r border-zinc-800/80 bg-zinc-950/60">
+      {/* Panel Header */}
+      <div className="border-b border-zinc-800/80 p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Users className="h-4 w-4 text-zinc-400" />
+            <h2 className="text-sm font-semibold text-zinc-100">Accounts</h2>
+            <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] font-medium text-zinc-400">
+              {accounts.length}
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={onAddAccount}
+            disabled={disabled}
+            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-emerald-500 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isAuthenticating ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Plus className="h-3.5 w-3.5" />
+            )}
+            <span>Add Account</span>
+          </button>
+        </div>
+
+        {/* Select All / None bar */}
+        <div className="flex items-center justify-between text-xs">
+          <span className="text-zinc-500">
+            {selectedCount} of {accounts.length} selected
+          </span>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={onSelectAll}
+              disabled={accounts.length === 0 || disabled}
+              className="rounded px-2 py-0.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40"
+            >
+              Select All
+            </button>
+            <span className="text-zinc-700">/</span>
+            <button
+              type="button"
+              onClick={onSelectNone}
+              disabled={selectedCount === 0 || disabled}
+              className="rounded px-2 py-0.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40"
+            >
+              None
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Auth Status / Error notifications */}
+      {isAuthenticating && authMessage && (
+        <div className="mx-3 mt-3 flex items-center gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-emerald-400" />
+          <span className="truncate">{authMessage}</span>
+        </div>
+      )}
+
+      {authError && (
+        <div className="mx-3 mt-3 flex items-start justify-between gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
+            <span className="leading-relaxed">{authError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={onDismissAuthError}
+            className="text-red-300 hover:text-white"
+            aria-label="Dismiss error"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      {/* Account List */}
+      <div className="flex-1 overflow-y-auto p-3">
+        {accounts.length === 0 ? (
+          <div className="flex h-full flex-col items-center justify-center rounded-xl border border-dashed border-zinc-800 px-6 py-10 text-center">
+            <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-zinc-900 text-zinc-500">
+              <User className="h-6 w-6" />
+            </div>
+            <p className="text-sm font-medium text-zinc-300">No accounts added yet</p>
+            <p className="mt-1 text-xs leading-relaxed text-zinc-500">
+              Click <strong>Add Account</strong> to sign in securely via Roblox. Cookies are encrypted locally using Windows DPAPI.
+            </p>
+          </div>
+        ) : (
+          <ul className="space-y-2">
+            {accounts.map((account) => {
+              const isSelected = selectedIds.has(account.userId);
+              const verify = verifyStates[account.userId] ?? { status: "idle" };
+              const session = sessions[account.userId];
+
+              return (
+                <li
+                  key={account.userId}
+                  onClick={() => !disabled && onToggleSelect(account.userId)}
+                  className={`group flex cursor-pointer items-center gap-3 rounded-xl border p-2.5 transition ${
+                    isSelected
+                      ? "border-emerald-500/40 bg-emerald-500/[0.08]"
+                      : "border-zinc-800/80 bg-zinc-900/50 hover:border-zinc-700 hover:bg-zinc-900"
+                  } ${disabled ? "pointer-events-none opacity-70" : ""}`}
+                >
+                  {/* Custom Checkbox */}
+                  <div
+                    className={`flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded border transition ${
+                      isSelected
+                        ? "border-emerald-500 bg-emerald-500 text-zinc-950"
+                        : "border-zinc-600 bg-zinc-950 group-hover:border-zinc-400"
+                    }`}
+                  >
+                    {isSelected && <Check className="h-3 w-3 stroke-[3]" />}
+                  </div>
+
+                  {/* Avatar */}
+                  <div className="relative h-10 w-10 shrink-0 overflow-hidden rounded-full bg-zinc-800 ring-1 ring-zinc-700/80">
+                    {account.avatarUrl ? (
+                      <img
+                        src={account.avatarUrl}
+                        alt={account.username}
+                        className="h-full w-full object-cover"
+                        loading="lazy"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-xs font-bold text-zinc-400">
+                        {account.username.slice(0, 2).toUpperCase()}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Identity + Compact Session Status */}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <p className="truncate text-sm font-medium text-zinc-100">
+                        {account.displayName || account.username}
+                      </p>
+                      {verify.status === "valid" && !session && (
+                        <CheckCircle2
+                          className="h-3.5 w-3.5 shrink-0 text-emerald-400"
+                          aria-label="Session valid"
+                        />
+                      )}
+                      {verify.status === "invalid" && (
+                        <span
+                          className="shrink-0 rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-300"
+                          title={verify.error}
+                        >
+                          Expired
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-1.5">
+                      <p className="truncate text-xs text-zinc-500">@{account.username}</p>
+                      {session && <SessionStatusBadge session={session} />}
+                    </div>
+                  </div>
+
+                  {/* Row Actions */}
+                  <div
+                    className="flex shrink-0 items-center gap-1 opacity-70 transition group-hover:opacity-100"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => onVerifyAccount(account.userId)}
+                      disabled={verify.status === "checking" || disabled}
+                      className="rounded-md p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40"
+                      title="Verify cookie & refresh profile"
+                    >
+                      <RefreshCw
+                        className={`h-3.5 w-3.5 ${verify.status === "checking" ? "animate-spin text-emerald-400" : ""}`}
+                      />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onRemoveAccount(account.userId)}
+                      disabled={disabled}
+                      className="rounded-md p-1.5 text-zinc-400 transition hover:bg-red-500/15 hover:text-red-400 disabled:opacity-40"
+                      title="Remove account"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </aside>
+  );
+}
